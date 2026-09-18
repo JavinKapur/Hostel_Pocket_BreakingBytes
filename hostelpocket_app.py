@@ -12,6 +12,7 @@ Production Iteration strictly adhering to the Software Design Document (SDD)
 """
 
 import os
+import time
 import datetime
 import pandas as pd
 import streamlit as st
@@ -377,6 +378,36 @@ def screen_add_expense():
                 st.session_state["prefill_friend"] = parsed.get("friend")
                 st.rerun()
 
+    # --- OCR Evidence Section (OUTSIDE form so OCR button can trigger rerun) ---
+    st.markdown("---")
+    st.markdown('<div style="font-size:12px; font-weight:700; text-transform:uppercase; color:#84806F; letter-spacing:0.06em; margin-bottom:4px;">📷 Scan Receipt / Bill with OCR</div>', unsafe_allow_html=True)
+    st.caption("Upload a clear photo of your bill and click Scan to auto-fill the form.")
+    uploaded_evidence = st.file_uploader(
+        "Upload bill photo or delivery order screenshot",
+        type=["png", "jpg", "jpeg"],
+        key="evidence_uploader",
+        help="PNG/JPG only. Use a well-lit, flat photo for best accuracy.",
+    )
+    if uploaded_evidence:
+        if st.button("🔍 Scan Bill with OCR → Auto-fill Form", key="btn_ocr_scan", type="primary"):
+            with st.spinner("Running OCR on your receipt..."):
+                img_bytes = uploaded_evidence.read()
+                result = ai_services.scan_receipt_image(img_bytes)
+            if "error" in result:
+                st.error(f"OCR could not read this image: {result['error']}")
+                st.caption("Tip: Use a well-lit, straight-on photo. Avoid blurry or crumpled receipts.")
+            else:
+                ocr_items = result.get("items", [])
+                st.session_state["prefill_title"] = result.get("title", "")
+                st.session_state["prefill_amount"] = float(result.get("amount", 0.0))
+                st.session_state["prefill_cat"] = result.get("category", "Food")
+                st.session_state["prefill_items"] = ocr_items
+                conf = result.get("confidence", 80)
+                st.success(f"✅ Scanned **{len(ocr_items)} item(s)** (confidence {conf}%). Form auto-filled — review below and click Save.")
+                st.rerun()
+
+    st.markdown("---")
+
     # Main Expense Form
     with st.form("form_add_expense"):
         c1, c2 = st.columns(2)
@@ -396,25 +427,25 @@ def screen_add_expense():
 
         # Itemization section per SDD Section 5.2 / FR-03
         st.markdown("**Purchased Items (Itemization)**")
-        st.caption("Optionally detail the individual items that add up to the total.")
-        
+        st.caption("Items auto-filled by OCR scan above, or enter manually below.")
+
         prefilled_items = st.session_state.get("prefill_items", [])
         if prefilled_items:
             items_df = pd.DataFrame(prefilled_items)
-            if "item_name" in items_df.columns:
-                st.dataframe(items_df, use_container_width=True)
+            display_cols = [c for c in ["item_name", "quantity", "unit_price", "line_total"] if c in items_df.columns]
+            if display_cols:
+                disp = items_df[display_cols].copy()
+                disp.columns = ["Item Name", "Qty", "Unit Price (₹)", "Line Total (₹)"][:len(display_cols)]
+                st.dataframe(disp, use_container_width=True, hide_index=True)
             items_payload = prefilled_items
         else:
-            item_n = st.text_input("Item Name", value=title or "Item 1", key="it_name_1")
+            item_n = st.text_input("Item Name", value=st.session_state.get("prefill_title", "") or "Item 1", key="it_name_1")
             c_q, c_p = st.columns(2)
             with c_q:
                 item_qty = st.number_input("Quantity", min_value=1.0, value=1.0, step=1.0, key="it_qty_1")
             with c_p:
-                item_price = st.number_input("Unit Price (₹)", min_value=0.0, value=float(amount), step=10.0, key="it_pr_1")
+                item_price = st.number_input("Unit Price (₹)", min_value=0.0, value=float(st.session_state.get("prefill_amount", 100.0)), step=10.0, key="it_pr_1")
             items_payload = [{"item_name": item_n, "quantity": item_qty, "unit_price": item_price, "line_total": item_qty * item_price}]
-
-        # Unified Evidence Banner per REQ-03 & FR-04
-        uploaded_evidence = render_evidence_banner()
 
         note = st.text_area("Optional Note", placeholder="Additional context (e.g. Paid via UPI, reimbursed partly)")
 

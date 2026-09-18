@@ -22,8 +22,15 @@ if GROQ_API_KEY and not GROQ_API_KEY.startswith("your_"):
         print(f"[Groq Init Notice] {e}")
 
 TEXT_MODEL = "openai/gpt-oss-120b"
-VISION_MODEL = "qwen/qwen3.8-27b"
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 AUDIO_MODEL = "whisper-large-v3-turbo"
+
+# Vision-capable models to try in order
+VISION_MODELS = [
+    "llama-3.2-11b-vision-preview",
+    "llama-3.2-90b-vision-preview",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
 
 # --------------------------------------------------------------------------
 # 1. VOICE TRANSCRIPTION
@@ -210,14 +217,15 @@ Output pure JSON with no markdown wrapping.
 def scan_receipt_image(image_bytes: bytes) -> Dict[str, Any]:
     """
     Extracts line items, vendor, and total from receipt/screenshot evidence.
+    3-tier strategy: Groq vision → local pytesseract OCR → LLM text parse.
     Complies with SDD REQ-03 (Single Evidence component).
     """
     start_time = time.time()
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-    prompt = """
-Extract all purchased items, the store/vendor name, category, and total amount from this bill/receipt.
-Output pure JSON matching:
+    json_schema_prompt = """Extract all purchased items, the store/vendor name, category, and total amount from this bill/receipt.
+Category must be one of: Food, Hostel, Travel, Shopping, Entertainment, Education, Utilities, Other.
+Output ONLY valid JSON with no markdown:
 {
   "title": "Campus Canteen",
   "category": "Food",
@@ -227,59 +235,154 @@ Output pure JSON matching:
     {"item_name": "Cold Coffee", "quantity": 2.0, "unit_price": 80.0, "line_total": 160.0}
   ],
   "confidence": 95
-}
-"""
+}"""
 
     parsed_data = None
+
+    # --- Strategy 1: Groq vision-capable models ---
     if client:
-        try:
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
-                ],
-            }]
-            resp = client.chat.completions.create(
-                model=VISION_MODEL,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=900,
-                temperature=0.1,
-            )
-            llm_output = resp.choices[0].message.content.strip()
-            parsed_data = json.loads(llm_output)
-        except Exception as e:
-            print(f"[Vision OCR Notice] {e}")
+        for vision_model in VISION_MODELS:
+            try:
+                messages = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": json_schema_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
+                    ],
+                }]
+                resp = client.chat.completions.create(
+                    model=vision_model,
+                    messages=messages,
+                    max_tokens=900,
+                    temperature=0.1,
+                )
+                raw_out = resp.choices[0].message.content.strip()
+                clean = re.sub(r"^```json\s*", "", raw_out)
+                clean = re.sub(r"\s*```$", "", clean).strip()
+                m = re.search(r"\{.*\}", clean, re.DOTALL)
+                if m:
+                    candidate = json.loads(m.group(0))
+                    if "total_amount" in candidate:
+                        parsed_data = candidate
+                        print(f"[Vision OCR] OK via {vision_model}")
+                        break
+            except Exception as e:
+                print(f"[Vision OCR] {vision_model} failed: {e}")
 
-    if not parsed_data or "total_amount" not in parsed_data:
-        parsed_data = {
-            "title": "Campus Store & Canteen",
-            "category": "Food",
-            "total_amount": 340.0,
-            "items": [
-                {"item_name": "Mess Meal / Snacks", "quantity": 1.0, "unit_price": 260.0, "line_total": 260.0},
-                {"item_name": "Beverage / Juice", "quantity": 1.0, "unit_price": 80.0, "line_total": 80.0},
-            ],
-            "confidence": 94,
-        }
+    # --- Strategy 2: Local pytesseract OCR → Groq LLM text parse ---
+    if not parsed_data:
+        raw_text = _extract_text_with_tesseract(image_bytes)
+        if raw_text and len(raw_text.strip()) > 10:
+            print(f"[Vision OCR] Tesseract got {len(raw_text)} chars — sending to LLM")
+            parsed_data = _parse_ocr_text_with_llm(raw_text)
 
-    total = float(parsed_data.get("total_amount", 340.0))
+    total = float(parsed_data.get("total_amount", 0.0)) if parsed_data else 0.0
     latency_ms = int((time.time() - start_time) * 1000)
 
     prism_tracer.log_llm_call(
         model=VISION_MODEL,
         input_messages=[{"role": "user", "content": "[Receipt Image Base64]"}],
-        output=json.dumps(parsed_data),
+        output=json.dumps(parsed_data or {}),
         latency_ms=latency_ms,
         agent_id="hostelpocket-vision-agent",
         agent_name="HostelPocket Vision OCR",
     )
+
+    if not parsed_data:
+        return {"error": "OCR could not read the image. Please use a clearer, well-lit photo of the receipt."}
 
     return {
         "title": parsed_data.get("title", "Scanned Receipt"),
         "category": parsed_data.get("category", "Food"),
         "amount": total,
         "items": parsed_data.get("items", []),
-        "confidence": parsed_data.get("confidence", 94),
+        "confidence": parsed_data.get("confidence", 80),
     }
+
+
+def _extract_text_with_tesseract(image_bytes: bytes) -> str:
+    """
+    Uses pytesseract + OpenCV preprocessing to extract text from a receipt image.
+    Returns empty string on any failure.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+        import numpy as np
+        import os
+
+        # Auto-detect Tesseract on common Windows install paths
+        for path in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\Users\javin\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+        ]:
+            if os.path.exists(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                break
+
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        # Preprocess for better OCR: grayscale + adaptive threshold
+        try:
+            import cv2
+            img_np = np.array(img)
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            processed = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            )
+            img = Image.fromarray(processed)
+        except ImportError:
+            img = img.convert("L")
+
+        text = pytesseract.image_to_string(img, config=r"--oem 3 --psm 4", lang="eng")
+        return text.strip()
+
+    except Exception as e:
+        print(f"[Tesseract OCR] Error: {e}")
+        return ""
+
+
+def _parse_ocr_text_with_llm(raw_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Sends raw OCR text from a receipt to Groq LLM and returns structured JSON.
+    """
+    if not client or not raw_text:
+        return None
+
+    system_prompt = """You are an expert receipt parser for HostelPocket, a student expense tracker.
+Given raw OCR text from a bill/receipt, extract structured data.
+Category must be one of: Food, Hostel, Travel, Shopping, Entertainment, Education, Utilities, Other.
+Output ONLY valid JSON, no markdown, no extra text:
+{
+  "title": "Store or vendor name",
+  "category": "Food",
+  "total_amount": 340.0,
+  "items": [
+    {"item_name": "Item Name", "quantity": 1.0, "unit_price": 180.0, "line_total": 180.0}
+  ],
+  "confidence": 90
+}"""
+
+    try:
+        resp = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Parse this receipt OCR text:\n\n{raw_text}"},
+            ],
+            max_tokens=900,
+            temperature=0.1,
+        )
+        raw_out = resp.choices[0].message.content.strip()
+        clean = re.sub(r"^```json\s*", "", raw_out)
+        clean = re.sub(r"\s*```$", "", clean).strip()
+        m = re.search(r"\{.*\}", clean, re.DOTALL)
+        if m:
+            result = json.loads(m.group(0))
+            if "total_amount" in result:
+                print(f"[OCR LLM Parse] OK — title={result.get('title')}, items={len(result.get('items', []))}")
+                return result
+    except Exception as e:
+        print(f"[OCR LLM Parse] Error: {e}")
+    return None
