@@ -128,6 +128,7 @@ def run_migrations():
         cur.execute("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS note TEXT;")
         cur.execute("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
         cur.execute("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;")
+        cur.execute("ALTER TABLE expenses ALTER COLUMN total_amount DROP NOT NULL;")
 
         # Backfill existing expenses if present
         cur.execute("""

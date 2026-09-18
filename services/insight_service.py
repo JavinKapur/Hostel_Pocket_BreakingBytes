@@ -16,9 +16,9 @@ def generate_hybrid_insight(user_id: str) -> Dict[str, Any]:
     categories = expense_repo.get_category_aggregates_with_items(user_id, month_start, today)
 
     # Deterministic factual baseline
-    monthly_spent = budget_data["monthly_spent"]
-    monthly_budget = budget_data["monthly_budget"] or 10000.0
-    pct = budget_data["monthly_pct"]
+    monthly_spent = float(budget_data["monthly_spent"])
+    monthly_budget = float(budget_data["monthly_budget"]) if budget_data.get("monthly_budget") else 10000.0
+    pct = float(budget_data["monthly_pct"])
 
     title = "Monthly Spending Pace"
     body = f"You have spent ₹{int(monthly_spent):,} ({round(pct)}%) of your monthly budget."
@@ -28,13 +28,14 @@ def generate_hybrid_insight(user_id: str) -> Dict[str, Any]:
     if categories:
         top_cat = categories[0]
         cat_name = top_cat["category_name"]
-        cat_total = top_cat["total_amount"]
+        cat_total = float(top_cat["total_amount"])
         cat_pct = round((cat_total / monthly_spent * 100) if monthly_spent > 0 else 0)
 
         if top_cat.get("items"):
             top_item = top_cat["items"][0]
             item_name = top_item["item_name"]
-            item_pct = round((top_item["item_total"] / cat_total * 100) if cat_total > 0 else 0)
+            item_total = float(top_item["item_total"])
+            item_pct = round((item_total / cat_total * 100) if cat_total > 0 else 0)
             title = f"{item_name} in {cat_name}"
             body = f"{item_name} represents {item_pct}% of this month's {cat_name.lower()} spend."
             action_label = f"Review {cat_name}"

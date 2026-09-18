@@ -38,10 +38,10 @@ def save_expense_atomic(
     try:
         # 1. Insert header
         cur.execute("""
-        INSERT INTO expenses (user_id, category_id, friend_id, title, amount, expense_date, note)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO expenses (user_id, category_id, friend_id, title, amount, total_amount, expense_date, note)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *;
-        """, (user_id, category_id, friend_id if friend_id else None, title.strip(), amount, expense_date, note.strip() if note else None))
+        """, (user_id, category_id, friend_id if friend_id else None, title.strip(), amount, amount, expense_date, note.strip() if note else None))
         expense = dict(cur.fetchone())
         expense_id = expense["id"]
 
@@ -218,7 +218,11 @@ def get_category_aggregates_with_items(user_id: str, start_date: datetime.date, 
         GROUP BY c.id, c.name, c.icon_key
         ORDER BY total_amount DESC;
         """, (user_id, start_date, end_date))
-        cat_rows = [dict(r) for r in cur.fetchall()]
+        cat_rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            d["total_amount"] = float(d["total_amount"])
+            cat_rows.append(d)
 
         # Get top items per category
         for cat in cat_rows:
@@ -231,7 +235,13 @@ def get_category_aggregates_with_items(user_id: str, start_date: datetime.date, 
             ORDER BY item_total DESC
             LIMIT 5;
             """, (user_id, cat["category_id"], start_date, end_date))
-            cat["items"] = [dict(r) for r in cur.fetchall()]
+            items_list = []
+            for it in cur.fetchall():
+                it_dict = dict(it)
+                it_dict["item_total"] = float(it_dict["item_total"])
+                it_dict["total_quantity"] = float(it_dict["total_quantity"])
+                items_list.append(it_dict)
+            cat["items"] = items_list
 
         return cat_rows
     finally:
