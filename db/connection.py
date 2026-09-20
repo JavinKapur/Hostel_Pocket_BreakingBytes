@@ -5,14 +5,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Fetch the environment variable string from Render
+# Fetch the variable from Render
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
     """Returns a direct psycopg2 connection to PostgreSQL."""
-    # Check if we are running on Render (which uses the full postgresql:// URI string)
-    if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
-        return psycopg2.connect(DATABASE_URL)
+    if DATABASE_URL:
+        cleaned_url = DATABASE_URL
+        # Render uses 'postgres://', but psycopg2 needs 'postgresql://'
+        if cleaned_url.startswith("postgres://"):
+            cleaned_url = cleaned_url.replace("postgres://", "postgresql://", 1)
+            
+        return psycopg2.connect(cleaned_url)
     else:
         # Local fallback string when running on your computer
         local_dsn = "dbname=postgres user=postgres password=BreakingBytes345 host=localhost port=54321"
