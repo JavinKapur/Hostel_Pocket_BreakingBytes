@@ -4,11 +4,22 @@ import datetime
 from typing import Dict, List, Any, Optional, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "dbname=postgres user=postgres password=BreakingBytes345 host=localhost port=54321"
-)
+load_dotenv()
+
+# 1. Fetch the environment variable string from Render
+RAW_DATABASE_URL = os.getenv("DATABASE_URL")
+
+if RAW_DATABASE_URL:
+    # Render uses 'postgres://', but psycopg2 requires 'postgresql://'
+    if RAW_DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = RAW_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    else:
+        DATABASE_URL = RAW_DATABASE_URL
+else:
+    # Local fallback string when running offline on your machine
+    DATABASE_URL = "dbname=postgres user=postgres password=BreakingBytes345 host=localhost port=54321"
 
 # Seed room members with realistic Indian UPI handles for deep linking
 DEFAULT_MEMBERS = [
@@ -28,6 +39,9 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
     try:
+        # Enable the UUID extension in the cloud database first
+        cur.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
+
         # Create tables if not exist
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -138,15 +152,13 @@ def add_expense_with_splits(
     total_amount: float,
     description: str,
     category: str,
-    splits: List[Dict[str, Any]],  # [{"friend_name": "Rahul", "amount_owed": 120.0}]
+    splits: List[Dict[str, Any]],
     group_name: str = "Room 304",
     image_url: Optional[str] = None,
 ) -> str:
-    """Inserts an expense and all constituent roommate splits atomically."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Get or create group
         cur.execute("SELECT id FROM groups WHERE name = %s LIMIT 1;", (group_name,))
         grow = cur.fetchone()
         if not grow:
@@ -155,7 +167,6 @@ def add_expense_with_splits(
         else:
             group_id = grow[0]
 
-        # Get payer ID
         cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s) LIMIT 1;", (paid_by_name,))
         prow = cur.fetchone()
         if not prow:
@@ -164,7 +175,6 @@ def add_expense_with_splits(
         else:
             payer_id = prow[0]
 
-        # Insert expense
         cur.execute(
             """
             INSERT INTO expenses (group_id, paid_by, total_amount, description, category, image_url)
@@ -174,7 +184,6 @@ def add_expense_with_splits(
         )
         expense_id = cur.fetchone()[0]
 
-        # Insert splits
         for item in splits:
             friend_name = item["friend_name"]
             amount_owed = float(item["amount_owed"])
@@ -195,7 +204,6 @@ def add_expense_with_splits(
                 (expense_id, owed_user_id, amount_owed, False),
             )
 
-        # Update payer budget
         cur.execute("UPDATE users SET remaining_budget = remaining_budget - %s WHERE id = %s;", (total_amount, payer_id))
 
         conn.commit()
@@ -245,11 +253,6 @@ def get_recent_expenses(limit: int = 10) -> List[Dict[str, Any]]:
 
 
 def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
-    """
-    Computes net balances:
-    positive = that roommate owes current_user
-    negative = current_user owes that roommate
-    """
     conn = get_connection()
     cur = conn.cursor()
     balances = {"Rahul": 120.0, "Arjun": 120.0, "Karan": -80.0}
@@ -260,7 +263,6 @@ def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
             return balances
         cu_id = cu_row[0]
 
-        # Amounts owed to current_user (current_user paid, others split)
         cur.execute(
             """
             SELECT u.name, SUM(s.amount)
@@ -275,67 +277,6 @@ def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
         for r in cur.fetchall():
             balances[r[0]] = balances.get(r[0], 0.0) + float(r[1])
 
-        # Amounts current_user owes others (someone else paid, current_user split)
         cur.execute(
             """
             SELECT u.name, SUM(s.amount)
-            FROM splits s
-            JOIN expenses e ON s.expense_id = e.id
-            JOIN users u ON e.paid_by = u.id
-            WHERE s.owed_by = %s AND e.paid_by != %s AND s.is_paid = false
-            GROUP BY u.name;
-            """,
-            (cu_id, cu_id),
-        )
-        for r in cur.fetchall():
-            balances[r[0]] = balances.get(r[0], 0.0) - float(r[1])
-
-        return balances
-    except Exception:
-        return balances
-    finally:
-        cur.close()
-        conn.close()
-
-
-def settle_debt_in_db(from_user: str, to_user: str) -> bool:
-    """Marks all open splits between from_user and to_user as paid."""
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s);", (from_user,))
-        f_row = cur.fetchone()
-        cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s);", (to_user,))
-        t_row = cur.fetchone()
-        if not f_row or not t_row:
-            return False
-
-        from_id, to_id = f_row[0], t_row[0]
-
-        # Splits where from_user owed to_user
-        cur.execute(
-            """
-            UPDATE splits SET is_paid = true
-            WHERE id IN (
-                SELECT s.id FROM splits s
-                JOIN expenses e ON s.expense_id = e.id
-                WHERE s.owed_by = %s AND e.paid_by = %s AND s.is_paid = false
-            );
-            """,
-            (from_id, to_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        cur.close()
-        conn.close()
-
-
-# Ensure DB tables exist on module import
-try:
-    init_db()
-except Exception as err:
-    print(f"[Database Initialization Notice] {err}")
