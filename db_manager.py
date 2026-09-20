@@ -8,11 +8,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 1. Fetch the environment variable string from Render
+# Fetch the environment variable string from Render
 RAW_DATABASE_URL = os.getenv("DATABASE_URL")
 
 if RAW_DATABASE_URL:
-    # Render uses 'postgres://', but psycopg2 requires 'postgresql://'
     if RAW_DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = RAW_DATABASE_URL.replace("postgres://", "postgresql://", 1)
     else:
@@ -21,12 +20,12 @@ else:
     # Local fallback string when running offline on your machine
     DATABASE_URL = "dbname=postgres user=postgres password=BreakingBytes345 host=localhost port=54321"
 
-# Seed room members with realistic Indian UPI handles for deep linking
+# Seed room members with realistic Indian UPI handles and placeholder emails
 DEFAULT_MEMBERS = [
-    {"name": "Javin", "phone_or_upi": "javin@okaxis", "weekly_budget": 6000.0, "remaining": 4230.0, "streak": 7, "xp": 480},
-    {"name": "Rahul", "phone_or_upi": "rahul.sharma@okhdfcbank", "weekly_budget": 5000.0, "remaining": 3800.0, "streak": 5, "xp": 350},
-    {"name": "Arjun", "phone_or_upi": "arjun.verma@icici", "weekly_budget": 5000.0, "remaining": 3400.0, "streak": 6, "xp": 410},
-    {"name": "Karan", "phone_or_upi": "karan98@paytm", "weekly_budget": 5000.0, "remaining": 2900.0, "streak": 3, "xp": 220},
+    {"name": "Javin", "email": "javin.student@gmail.com", "phone_or_upi": "javin@okaxis", "weekly_budget": 6000.0, "remaining": 4230.0, "streak": 7, "xp": 480},
+    {"name": "Rahul", "email": "rahul.student@gmail.com", "phone_or_upi": "rahul.sharma@okhdfcbank", "weekly_budget": 5000.0, "remaining": 3800.0, "streak": 5, "xp": 350},
+    {"name": "Arjun", "email": "arjun.student@gmail.com", "phone_or_upi": "arjun.verma@icici", "weekly_budget": 5000.0, "remaining": 3400.0, "streak": 6, "xp": 410},
+    {"name": "Karan", "email": "karan.student@gmail.com", "phone_or_upi": "karan98@paytm", "weekly_budget": 5000.0, "remaining": 2900.0, "streak": 3, "xp": 220},
 ]
 
 
@@ -42,11 +41,12 @@ def init_db():
         # Enable the UUID extension in the cloud database first
         cur.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
 
-        # Create tables if not exist
+        # Create tables if not exist (Added email column)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             name TEXT NOT NULL,
+            email TEXT,
             phone_or_upi TEXT,
             total_xp INTEGER DEFAULT 0,
             current_streak INTEGER DEFAULT 0,
@@ -102,11 +102,12 @@ def init_db():
             if not existing:
                 cur.execute(
                     """
-                    INSERT INTO users (name, phone_or_upi, total_xp, current_streak, weekly_budget_limit, remaining_budget)
-                    VALUES (%s, %s, %s, %s, %s, %s);
+                    INSERT INTO users (name, email, phone_or_upi, total_xp, current_streak, weekly_budget_limit, remaining_budget)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
                     """,
                     (
                         member["name"],
+                        member["email"],
                         member["phone_or_upi"],
                         member["xp"],
                         member["streak"],
@@ -115,10 +116,21 @@ def init_db():
                     ),
                 )
             else:
-                # Update UPI ID if missing
-                cur.execute("UPDATE users SET phone_or_upi = %s WHERE id = %s AND (phone_or_upi IS NULL OR phone_or_upi = '');", (member["phone_or_upi"], existing[0]))
+                # Update UPI ID and email if missing
+                cur.execute(
+                    """
+                    UPDATE users 
+                    SET phone_or_upi = COALESCE(phone_or_upi, %s),
+                        email = COALESCE(email, %s)
+                    WHERE id = %s;
+                    """, 
+                    (member["phone_or_upi"], member["email"], existing[0])
+                )
 
         conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
     finally:
         cur.close()
         conn.close()
@@ -267,16 +279,3 @@ def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
             """
             SELECT u.name, SUM(s.amount)
             FROM splits s
-            JOIN expenses e ON s.expense_id = e.id
-            JOIN users u ON s.owed_by = u.id
-            WHERE e.paid_by = %s AND s.owed_by != %s AND s.is_paid = false
-            GROUP BY u.name;
-            """,
-            (cu_id, cu_id),
-        )
-        for r in cur.fetchall():
-            balances[r[0]] = balances.get(r[0], 0.0) + float(r[1])
-
-        cur.execute(
-            """
-            SELECT u.name, SUM(s.amount)
