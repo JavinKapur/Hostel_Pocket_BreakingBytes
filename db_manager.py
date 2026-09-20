@@ -41,7 +41,7 @@ def init_db():
         # Enable the UUID extension in the cloud database first
         cur.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
 
-        # Create tables if not exist (Added email column)
+        # Create tables if not exist
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -86,7 +86,7 @@ def init_db():
         );
         """)
 
-        # Ensure unique group
+        # Ensure unique group (Fixed tuple indexing)
         cur.execute("SELECT id FROM groups WHERE name = %s LIMIT 1;", ("Room 304",))
         group_row = cur.fetchone()
         if not group_row:
@@ -116,7 +116,7 @@ def init_db():
                     ),
                 )
             else:
-                # Update UPI ID and email if missing
+                # Update UPI ID and email if missing (Fixed tuple indexing via existing[0])
                 cur.execute(
                     """
                     UPDATE users 
@@ -277,5 +277,3 @@ def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
 
         cur.execute(
             """
-            SELECT u.name, SUM(s.amount)
-            FROM splits s
