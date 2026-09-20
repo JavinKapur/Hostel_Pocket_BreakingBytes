@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,3 +21,9 @@ else:
 def get_connection():
     """Returns a direct psycopg2 connection to the active database context."""
     return psycopg2.connect(DATABASE_URL)
+
+def get_cursor(conn, dict_cursor=True):
+    """Returns a cursor, defaulting to RealDictCursor for clean dictionary access."""
+    if dict_cursor:
+        return conn.cursor(cursor_factory=RealDictCursor)
+    return conn.cursor()
