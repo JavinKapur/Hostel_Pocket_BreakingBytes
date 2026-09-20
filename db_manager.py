@@ -8,10 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Fetch the environment variable string from Render
+# 1. Fetch the environment variable string from Render
 RAW_DATABASE_URL = os.getenv("DATABASE_URL")
 
 if RAW_DATABASE_URL:
+    # Render uses 'postgres://', but psycopg2 requires 'postgresql://'
     if RAW_DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = RAW_DATABASE_URL.replace("postgres://", "postgresql://", 1)
     else:
@@ -20,12 +21,12 @@ else:
     # Local fallback string when running offline on your machine
     DATABASE_URL = "dbname=postgres user=postgres password=BreakingBytes345 host=localhost port=54321"
 
-# Seed room members with realistic Indian UPI handles and placeholder emails
+# Seed room members with realistic Indian UPI handles for deep linking
 DEFAULT_MEMBERS = [
-    {"name": "Javin", "email": "javin.student@gmail.com", "phone_or_upi": "javin@okaxis", "weekly_budget": 6000.0, "remaining": 4230.0, "streak": 7, "xp": 480},
-    {"name": "Rahul", "email": "rahul.student@gmail.com", "phone_or_upi": "rahul.sharma@okhdfcbank", "weekly_budget": 5000.0, "remaining": 3800.0, "streak": 5, "xp": 350},
-    {"name": "Arjun", "email": "arjun.student@gmail.com", "phone_or_upi": "arjun.verma@icici", "weekly_budget": 5000.0, "remaining": 3400.0, "streak": 6, "xp": 410},
-    {"name": "Karan", "email": "karan.student@gmail.com", "phone_or_upi": "karan98@paytm", "weekly_budget": 5000.0, "remaining": 2900.0, "streak": 3, "xp": 220},
+    {"name": "Javin", "phone_or_upi": "javin@okaxis", "weekly_budget": 6000.0, "remaining": 4230.0, "streak": 7, "xp": 480},
+    {"name": "Rahul", "phone_or_upi": "rahul.sharma@okhdfcbank", "weekly_budget": 5000.0, "remaining": 3800.0, "streak": 5, "xp": 350},
+    {"name": "Arjun", "phone_or_upi": "arjun.verma@icici", "weekly_budget": 5000.0, "remaining": 3400.0, "streak": 6, "xp": 410},
+    {"name": "Karan", "phone_or_upi": "karan98@paytm", "weekly_budget": 5000.0, "remaining": 2900.0, "streak": 3, "xp": 220},
 ]
 
 
@@ -34,18 +35,18 @@ def get_connection():
 
 
 def init_db():
-    """Initializes tables, ensures constraints, and seeds default room data safely."""
-    # STEP 1: Create the tables and commit them immediately so they are guaranteed to exist
+    """Initializes tables, ensures constraints, and seeds default room data if empty."""
     conn = get_connection()
     cur = conn.cursor()
     try:
+        # Enable the UUID extension in the cloud database first
         cur.execute("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
 
+        # Create tables if not exist
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             name TEXT NOT NULL,
-            email TEXT,
             phone_or_upi TEXT,
             total_xp INTEGER DEFAULT 0,
             current_streak INTEGER DEFAULT 0,
@@ -84,44 +85,28 @@ def init_db():
             is_paid BOOLEAN DEFAULT false
         );
         """)
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"[DB Init Stage 1 Error] Table creation failed: {e}")
-        cur.close()
-        conn.close()
-        return
-    finally:
-        cur.close()
-        conn.close()
 
-    # STEP 2: Open a fresh connection to handle data seeding safely without affecting table structures
-    conn = get_connection()
-    cur = conn.cursor()
-    try:
         # Ensure unique group
         cur.execute("SELECT id FROM groups WHERE name = %s LIMIT 1;", ("Room 304",))
         group_row = cur.fetchone()
         if not group_row:
             cur.execute("INSERT INTO groups (name) VALUES (%s) RETURNING id;", ("Room 304",))
-            group_res = cur.fetchone()
-            group_id = group_res[0] if group_res else None
+            group_id = cur.fetchone()[0]
         else:
             group_id = group_row[0]
 
-        # Seed or update users safely extracting structural elements from tuples
+        # Seed or update users
         for member in DEFAULT_MEMBERS:
             cur.execute("SELECT id FROM users WHERE name = %s LIMIT 1;", (member["name"],))
             existing = cur.fetchone()
             if not existing:
                 cur.execute(
                     """
-                    INSERT INTO users (name, email, phone_or_upi, total_xp, current_streak, weekly_budget_limit, remaining_budget)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                    INSERT INTO users (name, phone_or_upi, total_xp, current_streak, weekly_budget_limit, remaining_budget)
+                    VALUES (%s, %s, %s, %s, %s, %s);
                     """,
                     (
                         member["name"],
-                        member["email"],
                         member["phone_or_upi"],
                         member["xp"],
                         member["streak"],
@@ -130,21 +115,10 @@ def init_db():
                     ),
                 )
             else:
-                user_uuid = existing[0]
-                cur.execute(
-                    """
-                    UPDATE users 
-                    SET phone_or_upi = COALESCE(phone_or_upi, %s),
-                        email = COALESCE(email, %s)
-                    WHERE id = %s;
-                    """, 
-                    (member["phone_or_upi"], member["email"], user_uuid)
-                )
+                # Update UPI ID if missing
+                cur.execute("UPDATE users SET phone_or_upi = %s WHERE id = %s AND (phone_or_upi IS NULL OR phone_or_upi = '');", (member["phone_or_upi"], existing[0]))
 
         conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"[DB Init Stage 2 Notice] Data seeding skipped or rolled back: {e}")
     finally:
         cur.close()
         conn.close()
@@ -187,19 +161,19 @@ def add_expense_with_splits(
     try:
         cur.execute("SELECT id FROM groups WHERE name = %s LIMIT 1;", (group_name,))
         grow = cur.fetchone()
-        group_id = grow[0] if grow else None
-        if not group_id:
+        if not grow:
             cur.execute("INSERT INTO groups (name) VALUES (%s) RETURNING id;", (group_name,))
-            gres = cur.fetchone()
-            group_id = gres[0] if gres else None
+            group_id = cur.fetchone()[0]
+        else:
+            group_id = grow[0]
 
         cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s) LIMIT 1;", (paid_by_name,))
         prow = cur.fetchone()
-        payer_id = prow[0] if prow else None
-        if not payer_id:
+        if not prow:
             cur.execute("INSERT INTO users (name, phone_or_upi) VALUES (%s, %s) RETURNING id;", (paid_by_name, f"{paid_by_name.lower()}@upi"))
-            pres = cur.fetchone()
-            payer_id = pres[0] if pres else None
+            payer_id = cur.fetchone()[0]
+        else:
+            payer_id = prow[0]
 
         cur.execute(
             """
@@ -208,8 +182,7 @@ def add_expense_with_splits(
             """,
             (group_id, payer_id, total_amount, description, category, image_url),
         )
-        eres = cur.fetchone()
-        expense_id = eres[0] if eres else None
+        expense_id = cur.fetchone()[0]
 
         for item in splits:
             friend_name = item["friend_name"]
@@ -217,11 +190,11 @@ def add_expense_with_splits(
 
             cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s) LIMIT 1;", (friend_name,))
             urow = cur.fetchone()
-            owed_user_id = urow[0] if urow else None
-            if not owed_user_id:
+            if not urow:
                 cur.execute("INSERT INTO users (name, phone_or_upi) VALUES (%s, %s) RETURNING id;", (friend_name, f"{friend_name.lower()}@upi"))
-                ures = cur.fetchone()
-                owed_user_id = ures[0] if ures else None
+                owed_user_id = cur.fetchone()[0]
+            else:
+                owed_user_id = urow[0]
 
             cur.execute(
                 """
@@ -254,7 +227,7 @@ def get_recent_expenses(limit: int = 10) -> List[Dict[str, Any]]:
         FROM expenses e
         LEFT JOIN users u ON e.paid_by = u.id
         LEFT JOIN splits s ON e.id = s.expense_id
-        GROUP e.id, u.name
+        GROUP BY e.id, u.name
         ORDER BY e.created_at DESC
         LIMIT %s;
         """
@@ -270,3 +243,40 @@ def get_recent_expenses(limit: int = 10) -> List[Dict[str, Any]]:
                 "amount": float(r["amount"]),
                 "date": created_str,
                 "paidBy": r["paid_by"] or "Roommate",
+                "status": "Pending",
+                "participants": ["Rahul", "Arjun", "Karan"][:max(1, r["split_count"])],
+            })
+        return results
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_balances_for_user(current_user: str = "Javin") -> Dict[str, float]:
+    conn = get_connection()
+    cur = conn.cursor()
+    balances = {"Rahul": 120.0, "Arjun": 120.0, "Karan": -80.0}
+    try:
+        cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s);", (current_user,))
+        cu_row = cur.fetchone()
+        if not cu_row:
+            return balances
+        cu_id = cu_row[0]
+
+        cur.execute(
+            """
+            SELECT u.name, SUM(s.amount)
+            FROM splits s
+            JOIN expenses e ON s.expense_id = e.id
+            JOIN users u ON s.owed_by = u.id
+            WHERE e.paid_by = %s AND s.owed_by != %s AND s.is_paid = false
+            GROUP BY u.name;
+            """,
+            (cu_id, cu_id),
+        )
+        for r in cur.fetchall():
+            balances[r[0]] = balances.get(r[0], 0.0) + float(r[1])
+
+        cur.execute(
+            """
+            SELECT u.name, SUM(s.amount)
