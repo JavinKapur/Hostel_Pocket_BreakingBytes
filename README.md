@@ -1,4 +1,5 @@
 # 💸 HostelPocket — Student Hostel Personal Expense Tracker
+[![Render Deployment](https://shields.io)](https://hostel-pocket-breakingbytes.onrender.com)
 > **Implementation strictly adhering to the Software Design Document (SDD)**
 > *Powered by Streamlit, PostgreSQL, PRISM by Block Convey, and Secure Sample UPI Deep Links*
 
